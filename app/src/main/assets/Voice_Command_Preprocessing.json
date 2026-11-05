@@ -1,0 +1,21 @@
+{
+    "sample_rate": 16000,
+    "n_mfcc": 13,
+    "n_fft": 400,
+    "hop_length": 160,
+    "max_frames": 160,
+    "input_shape": [
+        1,
+        160,
+        13
+    ],
+    "class_order": [
+        "NEXT",
+        "PAUSE",
+        "PLAY",
+        "STOP",
+        "UNKNOWN"
+    ],
+    "normalization": "training_mean_and_std",
+    "normalization_file": "CNN_Normalisation.npz"
+}
