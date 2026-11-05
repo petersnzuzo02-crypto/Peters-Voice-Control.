@@ -22,11 +22,15 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executors
 import kotlin.math.max
+import kotlin.math.sin
+import kotlin.math.PI
+import java.util.Locale
 
 class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var result: TextView
     private lateinit var recordButton: Button
+    private lateinit var diagnosticButton: Button
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var busy = false
@@ -56,6 +60,11 @@ class MainActivity : Activity() {
             isEnabled = false
             setOnClickListener { startRecording() }
         }
+        diagnosticButton = Button(this).apply {
+            text = "Check MFCC parity (no microphone)"
+            isEnabled = false
+            setOnClickListener { runMfccDiagnostic() }
+        }
         result = TextView(this).apply {
             textSize = 18f
             text = "Results appear here. No Bluetooth commands will be sent."
@@ -71,6 +80,7 @@ class MainActivity : Activity() {
         container.addView(heading)
         container.addView(status)
         container.addView(recordButton)
+        container.addView(diagnosticButton)
         container.addView(result)
         container.addView(note)
         setContentView(ScrollView(this).apply { addView(container) })
@@ -87,8 +97,52 @@ class MainActivity : Activity() {
             interpreter = Interpreter(modelBuffer)
             status.text = "Offline model loaded. Tap to record."
             recordButton.isEnabled = true
+            diagnosticButton.isEnabled = true
         } catch (e: Exception) {
             status.text = "Model failed to load: ${e.message}"
+        }
+    }
+
+    private fun runMfccDiagnostic() {
+        if (busy) return
+        busy = true
+        diagnosticButton.isEnabled = false
+        recordButton.isEnabled = false
+        status.text = "Comparing deterministic MFCC features..."
+        executor.execute {
+            try {
+                // Exactly 2.0 seconds: 0.4 s silence, 1.2 s tones, 0.4 s silence.
+                // Same definition must be used in the Colab reference cell.
+                val signal = FloatArray(32000)
+                for (i in 6400 until 25600) {
+                    val t = (i - 6400) / 16000.0
+                    signal[i] = (0.25 * sin(2.0 * PI * 220.0 * t) +
+                        0.10 * sin(2.0 * PI * 440.0 * t)).toFloat()
+                }
+                val trimmed = AudioFeatures.trim(signal)
+                val feats = AudioFeatures.extract(signal, normalMean, normalStd)[0]
+                val report = buildString {
+                    append("MFCC PARITY DIAGNOSTIC (synthetic audio)\n")
+                    append("Trimmed samples: ${trimmed.size}\n")
+                    append("Shape: 160 x 13\n")
+                    append("Values: frame, coefficient, normalized MFCC\n")
+                    for (frame in listOf(0, 20, 50, 100)) {
+                        for (coeff in 0..3) {
+                            append("$frame,$coeff,${String.format(Locale.US, "%.6f", feats[frame][coeff])}\n")
+                        }
+                    }
+                    append("\nNo audio recorded or transmitted.")
+                }
+                mainHandler.post { result.text = report; status.text = "MFCC diagnostic complete." }
+            } catch (e: Exception) {
+                mainHandler.post { status.text = "Diagnostic error: ${e.message}" }
+            } finally {
+                mainHandler.post {
+                    busy = false
+                    diagnosticButton.isEnabled = true
+                    recordButton.isEnabled = true
+                }
+            }
         }
     }
 
