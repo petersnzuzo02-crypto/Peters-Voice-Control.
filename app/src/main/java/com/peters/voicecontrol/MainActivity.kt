@@ -46,8 +46,9 @@ class MainActivity : Activity() {
     private lateinit var exportButton: Button
     private lateinit var classSpinner: Spinner
     private lateinit var countsView: TextView
-    private lateinit var confirmButton: Button
-    private var proposedCommand: String? = null
+    // Conservative automatic execution gate; tune only after real-phone testing.
+    private val minAutoScore = 0.80f
+    private val minAutoMargin = 0.30f
     private var pendingDatasetPermission = false
     private val datasetClasses = listOf("PLAY", "PAUSE", "NEXT", "STOP", "UNKNOWN")
     private val createZipRequest = 301
@@ -92,7 +93,7 @@ class MainActivity : Activity() {
         }
         val mediaHelp = TextView(this).apply {
             text = "Connect your phone to Nzuzo Bluetooth Amp and start music in your phone's player. " +
-                "Manual controls test playback. Voice predictions never act without your confirmation."
+                "Manual buttons test playback. Voice commands run automatically only when the model is confident; otherwise no action."
             textSize = 14f
         }
         val manualControls = LinearLayout(this).apply {
@@ -104,16 +105,6 @@ class MainActivity : Activity() {
                 setOnClickListener { sendMediaCommand(command) }
             }
             manualControls.addView(button)
-        }
-        confirmButton = Button(this).apply {
-            text = "Confirm voice command"
-            isEnabled = false
-            setOnClickListener {
-                val selected = proposedCommand ?: return@setOnClickListener
-                sendMediaCommand(selected)
-                proposedCommand = null
-                isEnabled = false
-            }
         }
         val datasetHeading = TextView(this).apply {
             text = "DATASET RECORDING MODE"
@@ -148,13 +139,13 @@ class MainActivity : Activity() {
         refreshDatasetCounts()
         result = TextView(this).apply {
             textSize = 18f
-            text = "Results appear here. Voice commands require confirmation."
+            text = "Results appear here. High-confidence commands execute automatically."
             setPadding(0, 30, 0, 30)
         }
         val note = TextView(this).apply {
             text = "CNN v2 — EXPERIMENTAL VOICE RECOGNITION\n" +
                 "Validation accuracy was 80.43% on 46 examples, but phone recognition remains unreliable. " +
-                "Confirm every voice command before executing. " +
+                "Uncertain commands are ignored; scores are not calibrated probabilities. " +
                 "No audio is uploaded; processing runs on this phone."
             textSize = 14f
         }
@@ -166,7 +157,6 @@ class MainActivity : Activity() {
         container.addView(mediaHeading)
         container.addView(mediaHelp)
         container.addView(manualControls)
-        container.addView(confirmButton)
         container.addView(datasetHeading)
         container.addView(datasetHelp)
         container.addView(classSpinner)
@@ -403,8 +393,6 @@ class MainActivity : Activity() {
             return
         }
         busy = true
-        proposedCommand = null
-        confirmButton.isEnabled = false
         recordButton.isEnabled = false
         status.text = "Recording..."
         result.text = "Listening for 3.5 seconds."
@@ -421,26 +409,36 @@ class MainActivity : Activity() {
                 synchronized(engine) { engine.run(input, output) }
                 val scores = output[0]
                 val winning = scores.indices.maxByOrNull { scores[it] } ?: error("No model output")
+                val winningScore = scores[winning]
+                val secondScore = scores.indices.filter { it != winning }
+                    .maxOf { scores[it] }
+                val margin = winningScore - secondScore
+                val candidate = labels[winning]
+                // Fail closed: only fire for a deliberate, sufficiently strong prediction.
+                // These score rules reduce accidental actions, not classification errors.
+                val autoExecute = candidate != "UNKNOWN" &&
+                    winningScore.isFinite() &&
+                    secondScore.isFinite() &&
+                    winningScore >= minAutoScore &&
+                    margin >= minAutoMargin &&
+                    trimmed.size >= 4800 && trimmed.size <= 25440
                 val report = buildString {
-                    append("Predicted: ${labels[winning]} (experimental)\n")
-                    append("Trimmed audio: ${"%.2f".format(trimmed.size / 16000.0)} s\n")
-                    if (trimmed.size > 25440) append("Warning: audio may exceed 160 MFCC frames; end was truncated.\n")
+                    append("Predicted: $candidate (experimental)\n")
+                    append("Trimmed audio: ${"%.2f".format(Locale.US, trimmed.size / 16000.0)} s\n")
+                    append("Top score: ${"%.3f".format(Locale.US, winningScore)}, margin: ${"%.3f".format(Locale.US, margin)}\n")
+                    if (trimmed.size > 25440) append("Warning: speech may exceed the 160-frame limit.\n")
                     append("\nModel scores (not calibrated):\n")
-                    for (i in labels.indices) append("${labels[i]}: ${"%.3f".format(scores[i])}\n")
-                    append("\nVoice control is NOT automatic. Check the prediction before confirming.")
+                    for (i in labels.indices) append("${labels[i]}: ${"%.3f".format(Locale.US, scores[i])}\n")
+                    append(if (autoExecute) "\nAccepted — sending $candidate automatically." else "\nRejected — no automatic playback action.")
                 }
                 mainHandler.post {
                     result.text = report
-                    val candidate = labels[winning]
-                    if (candidate != "UNKNOWN") {
-                        proposedCommand = candidate
-                        confirmButton.text = "Confirm $candidate (only if correct)"
-                        confirmButton.isEnabled = true
-                        status.text = "Check the prediction. Confirm only if it matches what you said."
+                    if (autoExecute) {
+                        sendMediaCommand(candidate)
                     } else {
-                        proposedCommand = null
-                        confirmButton.isEnabled = false
-                        status.text = "UNKNOWN — no playback action available."
+                        status.text = if (candidate == "UNKNOWN")
+                            "UNKNOWN — no playback action." else
+                            "Low confidence / unclear recording — no playback action."
                     }
                 }
             } catch (e: Exception) {
