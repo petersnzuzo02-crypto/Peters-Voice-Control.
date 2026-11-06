@@ -8,6 +8,8 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.AudioManager
+import android.view.KeyEvent
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -44,6 +46,8 @@ class MainActivity : Activity() {
     private lateinit var exportButton: Button
     private lateinit var classSpinner: Spinner
     private lateinit var countsView: TextView
+    private lateinit var confirmButton: Button
+    private var proposedCommand: String? = null
     private var pendingDatasetPermission = false
     private val datasetClasses = listOf("PLAY", "PAUSE", "NEXT", "STOP", "UNKNOWN")
     private val createZipRequest = 301
@@ -81,6 +85,36 @@ class MainActivity : Activity() {
             isEnabled = false
             setOnClickListener { runMfccDiagnostic() }
         }
+        val mediaHeading = TextView(this).apply {
+            text = "MUSIC PLAYBACK CONTROLS"
+            textSize = 18f
+            setPadding(0, 25, 0, 8)
+        }
+        val mediaHelp = TextView(this).apply {
+            text = "Connect your phone to Nzuzo Bluetooth Amp and start music in your phone's player. " +
+                "Manual controls test playback. Voice predictions never act without your confirmation."
+            textSize = 14f
+        }
+        val manualControls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        for (command in listOf("PLAY", "PAUSE", "NEXT", "STOP")) {
+            val button = Button(this).apply {
+                text = "Manual $command"
+                setOnClickListener { sendMediaCommand(command) }
+            }
+            manualControls.addView(button)
+        }
+        confirmButton = Button(this).apply {
+            text = "Confirm voice command"
+            isEnabled = false
+            setOnClickListener {
+                val selected = proposedCommand ?: return@setOnClickListener
+                sendMediaCommand(selected)
+                proposedCommand = null
+                isEnabled = false
+            }
+        }
         val datasetHeading = TextView(this).apply {
             text = "DATASET RECORDING MODE"
             textSize = 18f
@@ -114,13 +148,13 @@ class MainActivity : Activity() {
         refreshDatasetCounts()
         result = TextView(this).apply {
             textSize = 18f
-            text = "Results appear here. No Bluetooth commands will be sent."
+            text = "Results appear here. Voice commands require confirmation."
             setPadding(0, 30, 0, 30)
         }
         val note = TextView(this).apply {
-            text = "EXPERIMENTAL RECOGNITION ONLY\n" +
-                "The CNN achieved 68.18% validation accuracy on 22 recordings. " +
-                "UNKNOWN recall was only 40%. Predictions are not safe for automatic playback control. " +
+            text = "CNN v2 — EXPERIMENTAL VOICE RECOGNITION\n" +
+                "Validation accuracy was 80.43% on 46 examples, but phone recognition remains unreliable. " +
+                "Confirm every voice command before executing. " +
                 "No audio is uploaded; processing runs on this phone."
             textSize = 14f
         }
@@ -129,6 +163,10 @@ class MainActivity : Activity() {
         container.addView(recordButton)
         container.addView(diagnosticButton)
         container.addView(result)
+        container.addView(mediaHeading)
+        container.addView(mediaHelp)
+        container.addView(manualControls)
+        container.addView(confirmButton)
         container.addView(datasetHeading)
         container.addView(datasetHelp)
         container.addView(classSpinner)
@@ -340,6 +378,24 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun sendMediaCommand(command: String) {
+        val keyCode = when (command) {
+            "PLAY" -> KeyEvent.KEYCODE_MEDIA_PLAY
+            "PAUSE" -> KeyEvent.KEYCODE_MEDIA_PAUSE
+            "NEXT" -> KeyEvent.KEYCODE_MEDIA_NEXT
+            "STOP" -> KeyEvent.KEYCODE_MEDIA_STOP
+            else -> return
+        }
+        try {
+            val audio = getSystemService(AUDIO_SERVICE) as AudioManager
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            status.text = "Sent $command media-button event to Android. Verify the player responded."
+        } catch (e: Exception) {
+            status.text = "Could not send $command: ${e.message}"
+        }
+    }
+
     private fun startRecording() {
         if (busy) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -347,6 +403,8 @@ class MainActivity : Activity() {
             return
         }
         busy = true
+        proposedCommand = null
+        confirmButton.isEnabled = false
         recordButton.isEnabled = false
         status.text = "Recording..."
         result.text = "Listening for 3.5 seconds."
@@ -369,9 +427,22 @@ class MainActivity : Activity() {
                     if (trimmed.size > 25440) append("Warning: audio may exceed 160 MFCC frames; end was truncated.\n")
                     append("\nModel scores (not calibrated):\n")
                     for (i in labels.indices) append("${labels[i]}: ${"%.3f".format(scores[i])}\n")
-                    append("\nNothing was sent to ESP32.")
+                    append("\nVoice control is NOT automatic. Check the prediction before confirming.")
                 }
-                mainHandler.post { result.text = report; status.text = "Recording processed offline." }
+                mainHandler.post {
+                    result.text = report
+                    val candidate = labels[winning]
+                    if (candidate != "UNKNOWN") {
+                        proposedCommand = candidate
+                        confirmButton.text = "Confirm $candidate (only if correct)"
+                        confirmButton.isEnabled = true
+                        status.text = "Check the prediction. Confirm only if it matches what you said."
+                    } else {
+                        proposedCommand = null
+                        confirmButton.isEnabled = false
+                        status.text = "UNKNOWN — no playback action available."
+                    }
+                }
             } catch (e: Exception) {
                 mainHandler.post { status.text = "Error: ${e.message}" }
             } finally {
