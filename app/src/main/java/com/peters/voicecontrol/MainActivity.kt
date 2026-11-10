@@ -95,6 +95,15 @@ class MainActivity : Activity() {
                 SpeechRecognizer.isOnDeviceRecognitionAvailable(this@MainActivity)
             setOnClickListener { startOfflineRecognition() }
         }
+        val activateHandsFreeButton = Button(this).apply {
+            text = "START HANDS-FREE SERVICE"
+            setOnClickListener { startHandsFreeService() }
+        }
+        val handsFreeNote = TextView(this).apply {
+            text = "Stage 1: Shows a persistent notification with Stop. " +
+                "Wake-word detection is not yet connected; microphone audio is not recorded by this service."
+            textSize = 14f
+        }
         val supportButton = Button(this).apply {
             text = "CHECK OFFLINE LANGUAGE SUPPORT"
             isEnabled = Build.VERSION.SDK_INT >= 33 &&
@@ -178,6 +187,8 @@ class MainActivity : Activity() {
         container.addView(heading)
         container.addView(status)
         container.addView(offlineButton)
+        container.addView(activateHandsFreeButton)
+        container.addView(handsFreeNote)
         container.addView(supportButton)
         container.addView(downloadButton)
         container.addView(recordButton)
@@ -213,6 +224,46 @@ class MainActivity : Activity() {
             diagnosticButton.isEnabled = true
         } catch (e: Exception) {
             status.text = "CNN failed to load: ${e.message}. On-device voice mode may still work."
+        }
+    }
+
+    /** Stage 1: user-initiated microphone foreground service; no wake-word capture yet. */
+    private fun startHandsFreeService() {
+        if (busy || offlineListening) {
+            status.text = "Finish the current recording before activating hands-free mode."
+            return
+        }
+        val missing = mutableListOf<String>()
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), 110)
+            return
+        }
+        launchHandsFreeService()
+    }
+
+    private fun launchHandsFreeService() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            status.text = "Microphone permission required to start hands-free service."
+            return
+        }
+        try {
+            val service = Intent(this, PetersHandsFreeService::class.java).apply {
+                action = PetersHandsFreeService.ACTION_START
+            }
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(service)
+            else startService(service)
+            status.text = "Hands-free service starting. Check the notification for Stop."
+            result.text = "Stage 1 only: notification service active. " +
+                "The wake-word detector is not connected and no audio is recorded by this service yet."
+        } catch (e: Exception) {
+            status.text = "Could not start hands-free service: ${e.message}"
         }
     }
 
@@ -675,6 +726,16 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 110) {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
+                (Build.VERSION.SDK_INT < 33 ||
+                    checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)) {
+                launchHandsFreeService()
+            } else {
+                status.text = "Allow microphone and notifications for hands-free activation and its Stop control."
+            }
+            return
+        }
         if (requestCode == 100) {
             val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
             val forDataset = pendingDatasetPermission
