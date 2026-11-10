@@ -23,4 +23,5 @@ android {
 dependencies {
     implementation("com.google.ai.edge.litert:litert:1.4.2")
     implementation("com.github.wendykierp:JTransforms:3.1")
+    implementation("com.alphacephei:vosk-android:0.3.75")
 }
