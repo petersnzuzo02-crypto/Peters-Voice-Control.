@@ -8,7 +8,6 @@
         android:name="android.hardware.microphone"
         android:required="true" />
 
-    <!-- Allow the app to discover speech recognition services -->
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
