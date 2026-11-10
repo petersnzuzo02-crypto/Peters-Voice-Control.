@@ -101,6 +101,12 @@ class MainActivity : Activity() {
                 SpeechRecognizer.isOnDeviceRecognitionAvailable(this@MainActivity)
             setOnClickListener { checkOfflineLanguageSupport() }
         }
+        val downloadButton = Button(this).apply {
+            text = "REQUEST ENGLISH OFFLINE MODEL DOWNLOAD"
+            isEnabled = Build.VERSION.SDK_INT >= 33 &&
+                SpeechRecognizer.isOnDeviceRecognitionAvailable(this@MainActivity)
+            setOnClickListener { requestEnglishOfflineModel() }
+        }
         diagnosticButton = Button(this).apply {
             text = "Check MFCC parity (no microphone)"
             isEnabled = false
@@ -173,6 +179,7 @@ class MainActivity : Activity() {
         container.addView(status)
         container.addView(offlineButton)
         container.addView(supportButton)
+        container.addView(downloadButton)
         container.addView(recordButton)
         container.addView(diagnosticButton)
         container.addView(result)
@@ -206,6 +213,39 @@ class MainActivity : Activity() {
             diagnosticButton.isEnabled = true
         } catch (e: Exception) {
             status.text = "CNN failed to load: ${e.message}. On-device voice mode may still work."
+        }
+    }
+
+    /** Android 13: request offline en-US model via the SAME on-device service. */
+    private fun requestEnglishOfflineModel() {
+        if (Build.VERSION.SDK_INT < 33 ||
+            !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            result.text = "On-device model downloads are not supported by this phone."
+            return
+        }
+        if (offlineListening || busy) {
+            status.text = "Finish the current recording first."
+            return
+        }
+        try {
+            supportRecognizer?.destroy()
+            val recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+            supportRecognizer = recognizer
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            }
+            recognizer.triggerModelDownload(intent)
+            status.text = "English (US) offline model download requested."
+            result.text = "Android received the download request. If a confirmation appears, approve it. " +
+                "Keep Wi-Fi connected and later tap CHECK OFFLINE LANGUAGE SUPPORT. " +
+                "A request is not proof that the download completed."
+        } catch (e: Exception) {
+            supportRecognizer?.destroy()
+            supportRecognizer = null
+            status.text = "Model download request failed: ${e.message}"
         }
     }
 
