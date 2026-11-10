@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.speech.RecognitionListener
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.net.Uri
@@ -45,6 +47,7 @@ class MainActivity : Activity() {
     private lateinit var result: TextView
     private lateinit var recordButton: Button
     private lateinit var offlineButton: Button
+    private var supportRecognizer: SpeechRecognizer? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var offlineListening = false
     private var pendingOfflinePermission = false
@@ -91,6 +94,12 @@ class MainActivity : Activity() {
             isEnabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 SpeechRecognizer.isOnDeviceRecognitionAvailable(this@MainActivity)
             setOnClickListener { startOfflineRecognition() }
+        }
+        val supportButton = Button(this).apply {
+            text = "CHECK OFFLINE LANGUAGE SUPPORT"
+            isEnabled = Build.VERSION.SDK_INT >= 33 &&
+                SpeechRecognizer.isOnDeviceRecognitionAvailable(this@MainActivity)
+            setOnClickListener { checkOfflineLanguageSupport() }
         }
         diagnosticButton = Button(this).apply {
             text = "Check MFCC parity (no microphone)"
@@ -163,6 +172,7 @@ class MainActivity : Activity() {
         container.addView(heading)
         container.addView(status)
         container.addView(offlineButton)
+        container.addView(supportButton)
         container.addView(recordButton)
         container.addView(diagnosticButton)
         container.addView(result)
@@ -196,6 +206,64 @@ class MainActivity : Activity() {
             diagnosticButton.isEnabled = true
         } catch (e: Exception) {
             status.text = "CNN failed to load: ${e.message}. On-device voice mode may still work."
+        }
+    }
+
+    /** Android 13+ language diagnostic; does not record audio or execute commands. */
+    private fun checkOfflineLanguageSupport() {
+        if (Build.VERSION.SDK_INT < 33) {
+            result.text = "Language diagnostics require Android 13 or later."
+            return
+        }
+        if (offlineListening || busy) {
+            status.text = "Finish the current recording before checking language support."
+            return
+        }
+        if (!SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            result.text = "No on-device speech recognition service is available."
+            return
+        }
+        supportRecognizer?.destroy()
+        supportRecognizer = null
+        try {
+            val recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+            supportRecognizer = recognizer
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            }
+            result.text = "Checking on-device language support for en-US..."
+            recognizer.checkRecognitionSupport(
+                intent,
+                mainExecutor,
+                object : RecognitionSupportCallback {
+                    override fun onSupportResult(support: RecognitionSupport) {
+                        result.text = buildString {
+                            append("ON-DEVICE RECOGNITION SUPPORT\n")
+                            append("Requested: en-US\n\n")
+                            append("Installed: ${support.installedOnDeviceLanguages}\n")
+                            append("Downloadable: ${support.supportedOnDeviceLanguages}\n")
+                            append("Pending: ${support.pendingOnDeviceLanguages}\n")
+                            append("Online: ${support.onlineLanguages}\n")
+                        }
+                        status.text = "Language support check finished."
+                        recognizer.destroy()
+                        if (supportRecognizer === recognizer) supportRecognizer = null
+                    }
+                    override fun onError(error: Int) {
+                        result.text = "Language support check failed: code $error"
+                        status.text = "The on-device service could not report its support."
+                        recognizer.destroy()
+                        if (supportRecognizer === recognizer) supportRecognizer = null
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            supportRecognizer?.destroy()
+            supportRecognizer = null
+            status.text = "Language support diagnostic failed: ${e.message}"
         }
     }
 
@@ -246,7 +314,7 @@ class MainActivity : Activity() {
             speechRecognizer?.setRecognitionListener(listener)
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-ZA")
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             }
@@ -583,6 +651,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         speechRecognizer?.destroy()
+        supportRecognizer?.destroy()
         executor.shutdown()
         interpreter?.close()
     }
