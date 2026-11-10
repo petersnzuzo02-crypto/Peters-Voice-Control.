@@ -3,6 +3,9 @@ package com.peters.voicecontrol
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.net.Uri
 import android.content.pm.PackageManager
 import android.media.AudioFormat
@@ -41,14 +44,16 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var result: TextView
     private lateinit var recordButton: Button
+    private lateinit var offlineButton: Button
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var offlineListening = false
+    private var pendingOfflinePermission = false
     private lateinit var diagnosticButton: Button
     private lateinit var datasetButton: Button
     private lateinit var exportButton: Button
     private lateinit var classSpinner: Spinner
     private lateinit var countsView: TextView
-    // Conservative automatic execution gate; tune only after real-phone testing.
-    private val minAutoScore = 0.80f
-    private val minAutoMargin = 0.30f
+    // Legacy CNN scores remain diagnostic only. New offline mode uses recognised words.
     private var pendingDatasetPermission = false
     private val datasetClasses = listOf("PLAY", "PAUSE", "NEXT", "STOP", "UNKNOWN")
     private val createZipRequest = 301
@@ -81,6 +86,12 @@ class MainActivity : Activity() {
             isEnabled = false
             setOnClickListener { startRecording() }
         }
+        offlineButton = Button(this).apply {
+            text = "VOICE COMMAND — ON-DEVICE RECOGNITION"
+            isEnabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                SpeechRecognizer.isOnDeviceRecognitionAvailable(this@MainActivity)
+            setOnClickListener { startOfflineRecognition() }
+        }
         diagnosticButton = Button(this).apply {
             text = "Check MFCC parity (no microphone)"
             isEnabled = false
@@ -93,7 +104,7 @@ class MainActivity : Activity() {
         }
         val mediaHelp = TextView(this).apply {
             text = "Connect your phone to Nzuzo Bluetooth Amp and start music in your phone's player. " +
-                "Manual buttons test playback. Voice commands run automatically only when the model is confident; otherwise no action."
+                "Manual buttons test playback. On-device voice mode uses spoken words; the old CNN is for testing only."
             textSize = 14f
         }
         val manualControls = LinearLayout(this).apply {
@@ -139,18 +150,19 @@ class MainActivity : Activity() {
         refreshDatasetCounts()
         result = TextView(this).apply {
             textSize = 18f
-            text = "Results appear here. High-confidence commands execute automatically."
+            text = "Results appear here. Use on-device voice recognition for commands; CNN mode is diagnostic."
             setPadding(0, 30, 0, 30)
         }
         val note = TextView(this).apply {
             text = "CNN v2 — EXPERIMENTAL VOICE RECOGNITION\n" +
                 "Validation accuracy was 80.43% on 46 examples, but phone recognition remains unreliable. " +
-                "Uncertain commands are ignored; scores are not calibrated probabilities. " +
+                "CNN is retained for comparison; its scores are not calibrated probabilities. " +
                 "No audio is uploaded; processing runs on this phone."
             textSize = 14f
         }
         container.addView(heading)
         container.addView(status)
+        container.addView(offlineButton)
         container.addView(recordButton)
         container.addView(diagnosticButton)
         container.addView(result)
@@ -165,6 +177,9 @@ class MainActivity : Activity() {
         container.addView(countsView)
         container.addView(note)
         setContentView(ScrollView(this).apply { addView(container) })
+        if (!offlineButton.isEnabled) {
+            status.text = "On-device speech recognition unavailable on this phone (requires Android 12+ and installed offline recognition service)."
+        }
         try {
             val norm = JSONObject(assets.open("normalization.json").bufferedReader().use { it.readText() })
             val m = norm.getJSONArray("mean")
@@ -176,11 +191,93 @@ class MainActivity : Activity() {
             modelBuffer.put(rawModel)
             modelBuffer.rewind()
             interpreter = Interpreter(modelBuffer)
-            status.text = "Offline model loaded. Tap to record."
+            status.text = "CNN loaded. On-device recogniser: " + if (offlineButton.isEnabled) "available" else "unavailable"
             recordButton.isEnabled = true
             diagnosticButton.isEnabled = true
         } catch (e: Exception) {
-            status.text = "Model failed to load: ${e.message}"
+            status.text = "CNN failed to load: ${e.message}. On-device voice mode may still work."
+        }
+    }
+
+    /** The offline service is requested explicitly; never silently fall back to cloud recognition. */
+    private fun startOfflineRecognition() {
+        if (busy || offlineListening) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingOfflinePermission = true
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 100)
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            status.text = "On-device speech recognition is unavailable; nothing was sent."
+            return
+        }
+        try {
+            speechRecognizer?.destroy()
+            speechRecognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+            val listener = object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) { status.text = "Listening: say a music command." }
+                override fun onBeginningOfSpeech() { status.text = "Speech detected..." }
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() { status.text = "Recognising words offline..." }
+                override fun onError(error: Int) {
+                    finishOfflineRecognition()
+                    status.text = "Offline recognition error $error. Check language pack and microphone."
+                    result.text = "No command was sent."
+                }
+                override fun onResults(results: Bundle?) {
+                    val hypotheses = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?: arrayListOf()
+                    // Accept the primary transcription only, not an arbitrary alternative hypothesis.
+                    val phrase = hypotheses.firstOrNull().orEmpty()
+                    val command = matchSpokenCommand(phrase)
+                    finishOfflineRecognition()
+                    result.text = "Recognised words: ${if (phrase.isBlank()) "(none)" else phrase}\n" +
+                        "Command: ${command ?: "UNKNOWN"}\n" +
+                        (if (command == null) "No matching command; no playback action." else
+                            "Exact supported phrase matched. Sending media command.")
+                    if (command != null) sendMediaCommand(command)
+                    else status.text = "UNKNOWN — no playback action."
+                }
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            }
+            speechRecognizer?.setRecognitionListener(listener)
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-ZA")
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            }
+            offlineListening = true
+            offlineButton.isEnabled = false
+            result.text = "Listening for spoken command..."
+            speechRecognizer?.startListening(intent)
+        } catch (e: Exception) {
+            finishOfflineRecognition()
+            status.text = "Could not start on-device recognition: ${e.message}"
+        }
+    }
+
+    private fun finishOfflineRecognition() {
+        offlineListening = false
+        speechRecognizer?.destroy()
+        speechRecognizer = null
+        offlineButton.isEnabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
+    }
+
+    private fun matchSpokenCommand(raw: String): String? {
+        val phrase = raw.lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9 ]"), " ")
+            .trim().replace(Regex("\\s+"), " ")
+        return when (phrase) {
+            "play", "play music", "play the music", "start music", "start the music", "resume music", "resume the music" -> "PLAY"
+            "pause", "pause music", "pause the music" -> "PAUSE"
+            "next", "next song", "next track", "skip song", "skip the song", "skip track", "skip to next song" -> "NEXT"
+            "stop", "stop music", "stop the music", "stop playing", "stop playback" -> "STOP"
+            else -> null
         }
     }
 
@@ -414,14 +511,8 @@ class MainActivity : Activity() {
                     .maxOf { scores[it] }
                 val margin = winningScore - secondScore
                 val candidate = labels[winning]
-                // Fail closed: only fire for a deliberate, sufficiently strong prediction.
-                // These score rules reduce accidental actions, not classification errors.
-                val autoExecute = candidate != "UNKNOWN" &&
-                    winningScore.isFinite() &&
-                    secondScore.isFinite() &&
-                    winningScore >= minAutoScore &&
-                    margin >= minAutoMargin &&
-                    trimmed.size >= 4800 && trimmed.size <= 25440
+                // CNN is diagnostic only: do not reject correct predictions by arbitrary score
+                // thresholds or trigger media actions from unreliable model predictions.
                 val report = buildString {
                     append("Predicted: $candidate (experimental)\n")
                     append("Trimmed audio: ${"%.2f".format(Locale.US, trimmed.size / 16000.0)} s\n")
@@ -429,17 +520,11 @@ class MainActivity : Activity() {
                     if (trimmed.size > 25440) append("Warning: speech may exceed the 160-frame limit.\n")
                     append("\nModel scores (not calibrated):\n")
                     for (i in labels.indices) append("${labels[i]}: ${"%.3f".format(Locale.US, scores[i])}\n")
-                    append(if (autoExecute) "\nAccepted — sending $candidate automatically." else "\nRejected — no automatic playback action.")
+                    append("\nCNN diagnostic only — no media action. Use on-device voice mode.")
                 }
                 mainHandler.post {
                     result.text = report
-                    if (autoExecute) {
-                        sendMediaCommand(candidate)
-                    } else {
-                        status.text = if (candidate == "UNKNOWN")
-                            "UNKNOWN — no playback action." else
-                            "Low confidence / unclear recording — no playback action."
-                    }
+                    status.text = "CNN result displayed for comparison (no action sent)."
                 }
             } catch (e: Exception) {
                 mainHandler.post { status.text = "Error: ${e.message}" }
@@ -485,14 +570,19 @@ class MainActivity : Activity() {
         if (requestCode == 100) {
             val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
             val forDataset = pendingDatasetPermission
+            val forOffline = pendingOfflinePermission
             pendingDatasetPermission = false
+            pendingOfflinePermission = false
             if (granted) {
-                if (forDataset) startDatasetRecording() else startRecording()
+                if (forDataset) startDatasetRecording()
+                else if (forOffline) startOfflineRecognition()
+                else startRecording()
             } else status.text = "Microphone permission is required to record commands."
         }
     }
     override fun onDestroy() {
         super.onDestroy()
+        speechRecognizer?.destroy()
         executor.shutdown()
         interpreter?.close()
     }
