@@ -2,7 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="true" />
@@ -27,6 +29,11 @@
             </intent-filter>
 
         </activity>
+        
+        <service
+            android:name=".PetersHandsFreeService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
     </application>
 
