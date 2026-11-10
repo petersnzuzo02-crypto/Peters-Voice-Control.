@@ -30,6 +30,22 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Download Vosk English Model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -fL --retry 3 \
+            https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip \
+            -o /tmp/vosk-model.zip
+
+          unzip -q /tmp/vosk-model.zip -d app/src/main/assets
+
+          mv app/src/main/assets/vosk-model-small-en-us-0.15 \
+             app/src/main/assets/vosk-model
+
+          echo "vosk-english-0.15" > app/src/main/assets/vosk-model/uuid
+
+          test -f app/src/main/assets/vosk-model/am/final.mdl
+          echo "Vosk model prepared successfully"
       - name: Build Debug APK
         run: gradle assembleDebug --stacktrace
 
